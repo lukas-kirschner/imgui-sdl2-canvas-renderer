@@ -1,14 +1,36 @@
-use imgui::DrawData;
-use sdl2::render::{Canvas, RenderTarget};
+use imgui::internal::RawWrapper;
+use imgui::{DrawCmd, DrawCmdParams, DrawData, TextureId};
+use sdl2::pixels::PixelFormatEnum;
+use sdl2::rect::Rect;
+use sdl2::render::{Canvas, RenderTarget, Texture};
+use sdl2::surface::Surface;
 use sdl2::sys::{SDL_Color, SDL_FPoint, SDL_RenderGeometry, SDL_Texture, SDL_Vertex};
 use std::ffi::c_int;
 
-pub struct CanvasRenderer {}
+pub struct CanvasRenderer {
+    textures: Vec<Texture>,
+}
 
 impl CanvasRenderer {
-    pub fn new(imgui_context: &mut imgui::Context) -> Result<Self, String> {
-        imgui_context.fonts().build_rgba32_texture();
-        Ok(Self {})
+    pub fn new<T: RenderTarget>(
+        imgui_context: &mut imgui::Context,
+        canvas: &mut Canvas<T>,
+    ) -> Result<Self, String> {
+        let imgui_font = imgui_context.fonts().build_rgba32_texture();
+        let mut font_data = imgui_font.data.to_vec();
+        let font_surface = Surface::from_data(
+            font_data.as_mut_slice(),
+            imgui_font.width,
+            imgui_font.height,
+            imgui_font.width * 4,
+            PixelFormatEnum::ABGR8888,
+        )?;
+        let font_atlas_texture = canvas
+            .create_texture_from_surface(font_surface)
+            .map_err(|e| format!("Could not create texture from font surface: {}", e))?;
+        let textures = vec![font_atlas_texture];
+        imgui_context.fonts().tex_id = TextureId::new(0);
+        Ok(Self { textures })
     }
 
     pub fn render<T: RenderTarget>(
@@ -77,8 +99,69 @@ impl CanvasRenderer {
                     rv
                 ));
             }
+
+            for command in draw_list.commands() {
+                match command {
+                    DrawCmd::Elements { count, cmd_params } => self.render_elements(
+                        count,
+                        cmd_params,
+                        data,
+                        framebuffer_w,
+                        framebuffer_h,
+                        canvas,
+                    )?,
+                    DrawCmd::RawCallback { callback, raw_cmd } => unsafe {
+                        callback(draw_list.raw(), raw_cmd)
+                    },
+                    DrawCmd::ResetRenderState => {
+                        //TODO implement me
+                    },
+                }
+            }
         }
 
+        Ok(())
+    }
+
+    fn render_elements<T: RenderTarget>(
+        &self,
+        _count: usize,
+        draw_cmd_params: DrawCmdParams,
+        data: &DrawData,
+        fb_w: f32,
+        fb_h: f32,
+        canvas: &mut Canvas<T>,
+    ) -> Result<(), String> {
+        let DrawCmdParams {
+            clip_rect,
+            texture_id,
+            vtx_offset: _,
+            idx_offset: _,
+        } = draw_cmd_params;
+        let clip_off = data.display_pos;
+        let scale = data.framebuffer_scale;
+
+        let clip_x1 = (clip_rect[0] - clip_off[0]) * scale[0];
+        let clip_y1 = (clip_rect[1] - clip_off[1]) * scale[1];
+        let clip_x2 = (clip_rect[2] - clip_off[0]) * scale[0];
+        let clip_y2 = (clip_rect[3] - clip_off[1]) * scale[1];
+
+        if clip_x1 >= fb_w || clip_y1 >= fb_h || clip_x2 < 0.0 || clip_y2 < 0.0 {
+            return Ok(());
+        }
+        if texture_id.id() >= self.textures.len() {
+            return Err(format!("Texture ID out of range: {}", texture_id.id()));
+        }
+        let _texture = &self.textures[texture_id.id()];
+        canvas.set_clip_rect(Rect::new(
+            clip_x1 as i32,
+            clip_y1 as i32,
+            (clip_x2 - clip_x1) as u32,
+            (clip_y2 - clip_y1) as u32,
+        ));
+        // canvas.copy(texture, None, None)?;
+        //TODO ???
+        canvas.set_clip_rect(None);
         Ok(())
     }
 }
